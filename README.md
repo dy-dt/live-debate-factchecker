@@ -14,7 +14,7 @@ context they need to judge it for themselves.
 Built in under 24 hours at **WHACK 2026** (London, 7–8 November 2026) for the **incident.io track**:
 *build an agent that reacts to a live feed as it happens, with personality.*
 
-![Live stage view: claims checked on each side, with a concession in the middle](screenshots/concession.png)
+![Live stage view: claims checked on each side, with a concession in the middle](screenshots/concession.jpg)
 
 ---
 
@@ -32,9 +32,9 @@ Two debaters speak into their own microphones. A few seconds after each sentence
 - **A final verdict**: a set of legal scales tipped by each side's evidence score, plus the points both
   sides agreed on and the issues still in dispute, with which way the evidence leans on each.
 
-![A U-turn caught mid-debate: Flip shows the opposition's "then" and "now" figures](screenshots/uturn.png)
+![A U-turn caught mid-debate: Flip shows the opposition's "then" and "now" figures](screenshots/uturn.jpg)
 
-![Final verdict: the scales, agreed points and still-disputed issues](screenshots/scales.png)
+![Final verdict: the scales, agreed points and still-disputed issues](screenshots/scales.jpg)
 
 ## How it works
 
