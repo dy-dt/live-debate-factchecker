@@ -1,99 +1,132 @@
-# debate-ref — live debate fact-checker + moderator
+# Debate Referee: a live debate fact-checker
 
-Project context, roles and the demo plan: [`docs/OVERVIEW.md`](docs/OVERVIEW.md).
+> *"By the time you'd typed a prompt about that claim, our agent had already checked it."*
 
-WHACK hackathon, incident.io track. Speech in → claims → evidence-backed verdicts → a referee that
-interjects at pauses. Plan: [`docs/B-PLAN.md`](docs/B-PLAN.md). Contracts: [`docs/CONTRACTS.md`](docs/CONTRACTS.md).
-How to plug your part in: [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
+An AI agent that **listens to a live debate, fact-checks every claim as it is spoken, and tracks how the
+argument moves**: who backed a figure with evidence, who quietly changed their story, and who conceded
+a point.
+
+**The goal is an audience that is harder to mislead.** Debaters can quote a confident but wrong figure, and
+it lands before anyone can check it. Debate Referee puts the evidence on screen beside the speakers while
+the debate is still going. It never interrupts: the debate runs as normal, and the audience gets the
+context they need to judge it for themselves.
+
+Built in under 24 hours at **WHACK 2026** (London, 7–8 November 2026) for the **incident.io track**:
+*build an agent that reacts to a live feed as it happens, with personality.*
+
+![Live stage view: claims checked on each side, with a concession in the middle](screenshots/stage-live-concession.png)
+
+---
+
+## What it does
+
+Two debaters speak into their own microphones. A few seconds after each sentence, the stage shows:
+
+- **A verdict on every checkable claim**: *supported*, *contradicted*, *missing context* or
+  *unverifiable*. Each one shows a verbatim quote and a link to its source. A cast of characters
+  presents them: **Sunny** cheers a claim that checks out, **Grumble** the stickler says "nope", and
+  **Professor Hoot** the pedant says "it's complicated".
+- **The wider picture** in the centre lane. **Flip** the chameleon appears when a side contradicts its
+  own earlier claim (a U-turn), with the "then" and "now" quotes side by side. **Dove** flies in when a
+  side concedes a point. Shared positions collect under **Common ground**.
+- **A final verdict**: a set of legal scales tipped by each side's evidence score, plus the points both
+  sides agreed on and the issues still in dispute, with which way the evidence leans on each.
+
+![A U-turn caught mid-debate: Flip shows the opposition's "then" and "now" figures](screenshots/stage-live-uturn.png)
+
+![Final verdict: the scales, agreed points and still-disputed issues](screenshots/stage-final-verdict.png)
+
+## How it works
+
+```
+2 mics (one per speaker, so no diarization)
+  → Ears: local streaming speech-to-text (faster-whisper), sentence segmentation
+  → Brain: claim extraction (Claude Haiku), argument map, consistency checker
+  → Evidence: pre-researched index for the motion → web search fallback → verdict + verified quote
+  → Stage: live two-sided view in the browser, final verdict screen
+```
+
+- **One process, one event bus.** FastAPI with asyncio queues. Modules talk only through typed events
+  (`Utterance`, `Claim`, `Verdict`, `Consistency`, `DebateSummary`, ...), never by importing each other.
+  A websocket fans events out to the browser.
+- **Everything is replayable.** Every event is logged to JSONL with wall-clock timestamps. A logged run
+  can be replayed through the live pipeline or straight to the UI, which gave us latency measurements,
+  debugging and a demo fallback for free.
+- **Pre-research is the speed trick.** When a motion is entered, the agent builds an evidence index for
+  it before the debate starts, so most checks hit a local index instead of the web.
+- **Anti-hallucination guards in code.** A verdict must quote its evidence, and code checks that the
+  quote really appears in the retrieved source; if it doesn't, the verdict is dropped. Numeric claims are
+  compared in code, not by the model. When unsure, the verdict is *unverifiable*.
+- **Measured, not guessed.** A hand-labelled 20-claim eval set gated every model change: **zero
+  fabricated quotes** across all runs, about 1.6 s p95 per verdict on Claude Haiku. The project has
+  500+ automated tests, and CI/CD deploys every push to `master` to a Vultr server in London.
+
+## My contributions (Thomas Read)
+
+**I proposed the original idea**, along with its focus on the audience: helping viewers resist
+misinformation without interrupting the debaters. Early ideas were narrators and commentators. The team adopted a test:
+*an agent must decide something, and its actions must change what happens next.* A live debate
+fact-checker passes it. The team was three people, and I owned the **Ears** (speech input) and the
+**Face** (the stage UI), and also built the consistency checker.
+
+### Ears: real-time speech-to-text
+- Built the live transcription pipeline (`ears/ears.py`) with **faster-whisper** running locally:
+  one audio channel per speaker from two microphones, which avoids error-prone speaker diarization.
+- It runs Whisper over a sliding window (4 s window, 0.5 s hop) and **merges overlapping windows word by
+  word**. The newest window wins where it heard more context, while a head margin protects words cut off
+  at a window's edge. Words heard twice because of timestamp jitter are removed.
+- Wrote the **sentence segmentation** so that only finished sentences go downstream: it handles
+  abbreviations ("U.S.", "Dr."), ellipses, punctuation that Whisper splits off ("57 %"), and speakers who
+  trail off without a full stop. It emits one JSON line per sentence, with timing and confidence, which
+  a small bridge turns into `Utterance`/`Pause` events.
+
+### Face: the stage UI
+- Designed and built the **character-based stage view** (`/stage`) in plain HTML/CSS/JS with no build
+  step: two sides, a cast of characters per verdict type, speech bubbles with the claim, explanation,
+  source quote, link and confidence, per-side scoreboards, a clickable history of past checks, and an
+  illustrated hall background (SVG).
+- Built the **setup screen**: enter a motion, a brief and the speakers' names, then "Research this
+  debate" runs pre-research with a live progress bar before the debate starts. This needed new events
+  in the shared schema and changes to the evidence pre-research job.
+
+### Consistency checker and final verdict
+- Wrote `app/brain/consistency.py`, which weighs each new turn against everything said earlier and
+  detects **self-contradictions (U-turns), concessions, agreements and corrections**. A "correction" is a
+  side updating its figure after a fact check, which shouldn't count as a U-turn.
+- It runs **cheap first**: code finds candidate pairs (shared content words, figures, or markers like
+  "I'll grant"), and a turn with no candidates costs no model call. Otherwise it makes one LLM call per
+  turn, with the debate so far sent as append-only blocks so it hits Anthropic's **prompt cache**. Code
+  guards follow: quotes must be verbatim, ids must be earlier claims, confidence must clear a threshold,
+  and *"even if ..."* is never a concession. A deterministic heuristic covers the clear cases if the
+  model is unavailable.
+- Built the **end-of-debate summary** and the legal-scales final screen. The model groups the debate into
+  agreed and disputed points, but **code, not the model, decides which way the evidence leans**, using
+  the verdicts. Added an eval script (`eval/eval_consistency.py`) against planted cases, with a target of
+  zero false U-turns.
+
+## Team
+
+- **Thomas Read** ([`dy-dt`](https://github.com/dy-dt)): original idea, Ears, Face (stage UI),
+  consistency checker
+- **Tong** ([`dabestthebest`](https://github.com/dabestthebest)): Brain (claim extraction, argument map),
+  event bus and schemas, integration lead
+- **Harkaran Bual** ([`JollyPerson`](https://github.com/JollyPerson)): Evidence (pre-research,
+  retrieval, verdicts), the eval set, deployment and the demo script
+
+## Tech
+
+Python · FastAPI · asyncio · WebSockets · faster-whisper · Claude (Haiku) via the Anthropic API ·
+fastembed + BM25 retrieval · Pydantic · vanilla JS/CSS/SVG · pytest · Docker · Caddy · GitHub Actions ·
+Vultr
 
 ## Run it
 
 ```bash
-./run.sh mock                      # whole pipeline on mocks, zero API keys -> open http://localhost:8000/debug
-./run.sh drive                     # recorded debate (fixtures/) through the REAL brain + evidence
-./run.sh live                      # real mics
-./run.sh replay --file logs/latest.jsonl   # demo backup: replays the last recorded run, no network
-PRINT=1 ./run.sh mock              # also print one line per event in the terminal
-./run.sh test-haiku                # the real pipeline on Haiku everywhere (claims, verdicts, consistency, summary)
-                                   # replaying fixtures/consistency_debate.jsonl. COSTS TOKENS: open /stage, then
-                                   # "⚖ Final verdict" at the end. Usage per model is in the log and the status dots
-FIXTURE=fixtures/consistency_debate.jsonl ./run.sh mock   # the same debate, free: simulated findings + summary
-./check.sh                         # tests (run before pushing)
+./run.sh mock                        # whole pipeline on mocks, no API keys
+FIXTURE=fixtures/consistency_debate.jsonl ./run.sh mock    # then open http://localhost:8000/stage
+./run.sh drive                       # a recorded debate through the real pipeline (needs keys in .env)
+cd ears && ./runstt.sh | python bridge.py --url http://localhost:8000    # live mics
 ```
 
-Pushes to `master` deploy to Vultr: see [`docs/DEPLOY.md`](docs/DEPLOY.md).
-
-Replay options: `--speed 2` (2x faster), `--max-gap 5` (silences longer than 5 s are cut to 5 s; this is the
-default, `0` keeps them), `--all-sessions` (by default a log replays from its last `SessionStart`, so rehearsals
-earlier in the same log are skipped), `--only Utterance Pause` (re-drive the live pipeline from recorded speech).
-`logs/latest.jsonl` always points at the last run that wasn't itself a replay. A missing `--file` stops with an
-error that says how to create it. `run.sh` reinstalls packages whenever any `requirements*.txt` file changes. If pip fails (offline),
-it warns and starts anyway with the existing `.venv`. `SKIP_PIP=1` never runs pip.
-
-Mix and match roles per run with env vars — each is `real | mock | off | external | pkg.module:function`:
-
-```bash
-EARS=real BRAIN=real EVIDENCE=mock ./run.sh mock     # A's ears + B's brain, canned verdicts
-EVIDENCE=external ./run.sh drive                     # C runs as a separate process (connects to /ws)
-SPEED=4 ./run.sh drive                               # replay the fixture 4x faster
-```
-
-| Profile | ears | brain | evidence | face |
-|---|---|---|---|---|
-| `mock` | mock | mock | mock | off |
-| `drive` | mock (fixture) | real | real | real |
-| `live` | real | real | real | real |
-| `dev-a` | real | off | off | off |
-| `dev-b` | mock | real | mock | off |
-| `dev-c` | mock | mock | real | off |
-| `dev-d` | mock | mock | mock | real |
-| `replay` | off | off | off | real (+ `--file`) |
-
-Override values: `real`, `mock`, `off`, `external`, `pkg.module:function` (or `pkg.module`, meaning
-`pkg.module:run`). Case doesn't matter. A typo such as `EVIDENCE=Externl` shows a red dot that says so. There is
-no face mock, so use `FACE=off` or `FACE=external`.
-
-Keys go in `.env` (copy `.env.example`, which must hold key *names* only; `.env` is gitignored, `.env.example` is
-not). `run.sh` loads `.env`, and so does `app/config.py` on import, so `python -m ...` and `scripts/` see the keys
-too. Tests never load it. The claim extractor uses **Claude** (`ANTHROPIC_API_KEY`, default
-`claude-haiku-5-5`) or **ChatGPT** (`OPENAI_API_KEY`, default `gpt-6-luna`), whichever key is present. If both are
-present Claude wins, unless `OPENAI_MODEL` is set. Any OpenAI-compatible server works via `LLM_BASE_URL`.
-`LLM_PROVIDER=heuristic` forces the no-LLM path, and with no key it also runs on heuristics.
-Check speed with `.venv/bin/python scripts/bench_llm.py` and quality with `.venv/bin/python -m eval.eval_extract`.
-
-## Layout and ownership
-
-```
-app/schemas.py   B  event contracts (additive changes only — ask B)
-app/bus.py       B  pub/sub + JSONL log + replay
-app/main.py      B  module registry, /ws, /publish, /session, /control, /health, /debug
-app/config.py    B  flags + tunables (all env-overridable)
-app/brain/       B  claims.py (+llm.py, prompts.py), argmap.py, director.py (+voice.py), run.py
-app/ears/        A  run.py with `run(bus)` (async or plain) and/or routes.py (FastAPI router) — or external
-app/evidence/    C  run.py with `run(bus)` (async or plain) — or external
-app/face/        D  static/index.html (served at /), routes.py, run.py — or any frontend on /ws
-app/mocks/       B  mock_ears / mock_brain / mock_evidence / printer
-app/tools/       B  ws_debug.html (reference client, served at /debug), tail.py
-app/latency.py   B  latency report + helpers
-ears/            A  Thomas's uv package, until it moves into app/ears/
-fixtures/        shared test debates (JSONL, same format as logs)
-eval/            extraction eval and the 20-claim verdict eval
-logs/            one JSONL per run (+ latest.jsonl) — every event, replayable
-deploy/          production stack on Vultr (see docs/DEPLOY.md)
-```
-
-**Rules:** edit only your own folder and your own `requirements/<role>.txt`. Shared files change through B
-(turnaround < 10 min). Need a new field? Just send it — extra fields pass through everywhere — and tell B
-if it should become official. Every run is logged; `./run.sh replay --file logs/<run>.jsonl` reproduces it.
-
-## Fallback ladder (demo)
-
-L0 live mics → L1 `./run.sh drive` (recorded debate, live pipeline) → L2 `./run.sh replay --file fixtures/golden_run.jsonl`
-(no network) → L3 backup video. Keep the next command typed in a second terminal.
-
-**`fixtures/golden_run.jsonl` is not in the repo.** It exists only after you save a good run at the 20:00
-checkpoint with `cp logs/latest.jsonl fixtures/golden_run.jsonl` (cp follows the symlink). Until then L2 stops at
-once with "No such file" and that same `cp` hint, so check `ls fixtures/golden_run.jsonl` before judging. A raw
-log from a live rehearsal works as it is: the replay starts at its last `SessionStart` and cuts idle gaps. The
-same log also works as a `drive` fixture (`FIXTURE=fixtures/golden_run.jsonl ./run.sh drive`). In that case mock
-ears re-emit only its SessionStart/Utterance/Pause lines and the live brain does the rest.
+*The screenshots come from a scripted test debate replayed through the pipeline, with a stand-in
+evidence module, so they show the UI without API keys. The characters are drawn in the app itself.*
